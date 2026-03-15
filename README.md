@@ -79,6 +79,7 @@ cp ~/.feishu-claude/sessions.json.backup.YYYYMMDD_HHMMSS ~/.feishu-claude/sessio
 - **看门狗自愈** - 4 小时自动重启，防止 WebSocket 假死
 - **多用户隔离** - 每个飞书用户独立 session，互不干扰
 - **群组工作空间绑定** - 不同群组可长期绑定不同项目目录，切群即切项目
+- **多群组并发** - 同一用户在多个群组同时调用 Claude，互不阻塞
 
 ---
 
