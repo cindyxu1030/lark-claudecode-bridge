@@ -1,6 +1,12 @@
 import asyncio
+import sys
+import os
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
+
+# 添加项目根目录到 sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from main import handle_message_async, _chat_locks
 from session_store import SessionStore
 
