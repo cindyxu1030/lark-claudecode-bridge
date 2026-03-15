@@ -32,6 +32,26 @@
 | `/help` | 帮助 |
 | `/commit` 等 | 透传给 Claude CLI Skills |
 
+## 迁移指南（现有用户）
+
+如果你从旧版本升级，需要迁移 session 数据以支持群组功能：
+
+```bash
+# 运行迁移脚本（会自动备份）
+python migrate_sessions.py
+
+# 如果出现问题，可以回滚：
+cp ~/.feishu-claude/sessions.json.backup.YYYYMMDD_HHMMSS ~/.feishu-claude/sessions.json
+```
+
+迁移脚本会：
+- 自动备份原数据
+- 将数据迁移到新格式（支持群组隔离）
+- 验证迁移完整性
+- 提供回滚指令
+
+**注意**：迁移后，你的私聊 session 会继续正常工作，无需任何操作。
+
 ## 架构
 
 ```
