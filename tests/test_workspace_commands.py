@@ -9,6 +9,8 @@ os.environ.setdefault("FEISHU_APP_SECRET", "test_app_secret")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import session_store as session_store_module
+import agent_hub as agent_hub_module
+import commands as commands_module
 from commands import handle_command
 from session_store import SessionStore
 
@@ -19,6 +21,9 @@ def isolated_store(tmp_path, monkeypatch):
     sessions_dir.mkdir()
     monkeypatch.setattr(session_store_module, "SESSIONS_DIR", str(sessions_dir))
     monkeypatch.setattr(session_store_module, "SESSIONS_FILE", str(sessions_dir / "sessions.json"))
+    monkeypatch.setattr(agent_hub_module, "PROJECTS_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setattr(agent_hub_module, "AGENT_HUB_ROOT", str(tmp_path / "projects" / "_agent-hub"))
+    monkeypatch.setattr(commands_module, "AGENT_HUB_ROOT", str(tmp_path / "projects" / "_agent-hub"))
     return SessionStore()
 
 
@@ -118,3 +123,54 @@ async def test_ls_supports_relative_subdir(isolated_store, tmp_path):
     assert "请求路径：`backend`" in reply
     assert f"绝对路径：`{nested}`" in reply
     assert "`app.py`" in reply
+
+
+@pytest.mark.asyncio
+async def test_project_new_creates_hub_files_and_binds_chat(isolated_store, tmp_path):
+    user_id = "user_123"
+    chat_id = "group_001"
+
+    reply = await handle_command("project", "new alpha", user_id, chat_id, isolated_store)
+    current = await isolated_store.get_current(user_id, chat_id)
+    project = tmp_path / "projects" / "alpha"
+
+    assert "当前聊天已绑定到项目 `alpha`" in reply
+    assert current.cwd == str(project)
+    assert current.workspace == "alpha"
+    assert (project / "AGENTS.md").exists()
+    assert (project / "CLAUDE.md").exists()
+    assert (project / "PROJECT_CONTEXT.md").exists()
+    assert (tmp_path / "projects" / "_agent-hub" / "lark-chat-map.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_project_new_supports_unicode_project_names(isolated_store, tmp_path):
+    user_id = "user_123"
+    chat_id = "group_001"
+
+    await handle_command("project", "new 小蓝不打工了", user_id, chat_id, isolated_store)
+    current = await isolated_store.get_current(user_id, chat_id)
+
+    assert current.cwd == str(tmp_path / "projects" / "小蓝不打工了")
+    assert current.workspace == "小蓝不打工了"
+
+
+@pytest.mark.asyncio
+async def test_brief_handoff_task_and_sync_use_current_project(isolated_store, tmp_path):
+    user_id = "user_123"
+    chat_id = "group_001"
+
+    await handle_command("project", "new alpha", user_id, chat_id, isolated_store)
+    handoff = await handle_command("handoff", "Codex finished setup.", user_id, chat_id, isolated_store)
+    task = await handle_command("task", "Wire Claude bridge into the same project.", user_id, chat_id, isolated_store)
+    brief = await handle_command("brief", "", user_id, chat_id, isolated_store)
+    sync = await handle_command("sync", "", user_id, chat_id, isolated_store)
+
+    project = tmp_path / "projects" / "alpha"
+    assert "已追加交接记录" in handoff
+    assert "已追加任务" in task
+    assert "Codex finished setup." in (project / "HANDOFF.md").read_text(encoding="utf-8")
+    assert "Wire Claude bridge" in (project / "TASKS.md").read_text(encoding="utf-8")
+    assert "# Project Brief: alpha" in brief
+    assert "已同步项目摘要" in sync
+    assert (project / "PROJECT_BRIEF.md").exists()

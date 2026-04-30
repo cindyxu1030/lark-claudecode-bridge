@@ -1,6 +1,14 @@
 .env
 .env.test
+.codex-home/
+.lark-codex-sessions/
+.test-sessions/
+.pycache-tmp/
+.pytest_cache/
 .venv/
+bridge.pid
+bridge.lock
+logs/
 __pycache__/
 *.pyc
 *.egg-info/

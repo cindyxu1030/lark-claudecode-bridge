@@ -13,7 +13,7 @@ import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
-from bot_config import AGENT_HUB_ROOT, CLAUDE_CLI, DEFAULT_CWD
+from bot_config import AGENT_HUB_ROOT, CODEX_CLI, CODEX_HOME, DEFAULT_CWD
 from agent_hub import (
     append_handoff,
     append_task,
@@ -27,7 +27,10 @@ from agent_hub import (
 )
 from session_store import SessionStore, scan_cli_sessions, generate_summary, _get_api_token, _write_custom_title
 
-PLUGINS_DIR = os.path.expanduser("~/.claude/plugins")
+SKILLS_DIRS = [
+    os.path.expanduser("~/.codex/skills"),
+    os.path.expanduser("~/.agents/skills"),
+]
 
 
 VALID_MODES = {
@@ -45,9 +48,10 @@ MODE_ALIASES = {
 }
 
 MODEL_ALIASES = {
-    "opus": "claude-opus-4-6",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
+    "fast": "gpt-5.4-mini",
+    "mini": "gpt-5.4-mini",
+    "default": "gpt-5.4",
+    "frontier": "gpt-5.5",
 }
 
 HELP_TEXT = """\
@@ -58,7 +62,7 @@ HELP_TEXT = """\
 `/stop` — 停止当前正在运行的任务
 `/new` 或 `/clear` — 开始新 session
 `/resume` — 查看历史 sessions / `/resume [序号]` 恢复
-`/model [名称]` — 切换模型（opus / sonnet / haiku 或完整 ID）
+`/model [名称]` — 切换模型（default / mini / frontier 或完整 ID）
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
@@ -73,18 +77,18 @@ HELP_TEXT = """\
 `/sync` — 生成 PROJECT_BRIEF.md
 
 **查看能力：**
-`/skills` — 列出已安装的 Claude Skills
+`/skills` — 列出已安装的 Codex/Agent Skills
 `/mcp` — 列出已配置的 MCP Servers
-`/usage` — 查看 Claude Max 订阅用量百分比和重置时间
+`/usage` — 查看 Codex 登录状态
 
 
-**Claude Skills（直接转发给 Claude 执行）：**
+**Codex 指令（直接转发给 Codex 执行）：**
 `/commit` — 提交代码
-其他 `/xxx` — 自动转发给 Claude 处理
+其他 `/xxx` — 自动转发给 Codex 处理
 
 **MCP 工具：** 已配置的 MCP servers 自动可用，直接对话即可调用。
 
-**发送任意普通消息即可与 Claude 对话。**\
+**发送任意普通消息即可与 Codex 对话。**\
 """
 
 
@@ -102,7 +106,7 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
     return cmd, args
 
 
-# Bot 自身处理的命令，其余 /xxx 转发给 Claude
+# Bot 自身处理的命令，其余 /xxx 转发给 Codex
 BOT_COMMANDS = {
     "help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "ls",
     "workspace", "ws", "project", "brief", "handoff", "task", "sync",
@@ -251,19 +255,16 @@ async def _format_session_list(user_id: str, chat_id: str, store: SessionStore) 
 
 
 def _list_skills() -> str:
-    """扫描 ~/.claude/plugins 目录，列出所有可用的 slash command skills"""
+    """扫描本机 Codex/agent skills 目录，列出可用 skills"""
     skills = []
-    if not os.path.isdir(PLUGINS_DIR):
-        return "暂无已安装的 skills。"
-
-    for root, dirs, files in os.walk(PLUGINS_DIR):
-        if os.path.basename(root) != "commands":
+    for base_dir in SKILLS_DIRS:
+        if not os.path.isdir(base_dir):
             continue
-        for fname in files:
-            if not fname.endswith(".md"):
+        for root, dirs, files in os.walk(base_dir):
+            if "SKILL.md" not in files:
                 continue
-            name = fname[:-3]
-            fpath = os.path.join(root, fname)
+            name = os.path.basename(root)
+            fpath = os.path.join(root, "SKILL.md")
             desc = ""
             try:
                 with open(fpath, encoding="utf-8") as f:
@@ -285,121 +286,44 @@ def _list_skills() -> str:
         return "暂无已安装的 skills。"
 
     skills.sort(key=lambda x: x[0])
-    lines = ["🛠 **可用 Skills**（发送 `/名称` 即可调用）\n"]
+    lines = ["🛠 **可用 Skills**\n"]
     for name, desc in skills:
         desc_str = f" — {desc}" if desc else ""
-        lines.append(f"• `/{name}`{desc_str}")
+        lines.append(f"• `{name}`{desc_str}")
     return "\n".join(lines)
 
 
 def _get_usage() -> str:
-    """
-    发一个轻量 API 请求，从响应 headers 获取 Claude Max 订阅用量百分比和重置时间。
-    """
-    if sys.platform != "darwin":
-        return "❌ /usage 目前只支持 macOS"
-
-    import urllib.request
-    import urllib.error
-    import ssl
-
+    """Show Codex auth status; Codex CLI does not expose subscription usage headers."""
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
+            [CODEX_CLI, "login", "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={**os.environ, "CODEX_HOME": os.path.expanduser(CODEX_HOME)},
         )
-        creds = json.loads(result.stdout.strip())
-        token = creds["claudeAiOauth"]["accessToken"]
     except Exception as e:
-        return f"❌ 读取凭证失败：{e}"
-
-    body = json.dumps({
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "hi"}],
-    }).encode()
-
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
-    try:
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            headers = dict(resp.headers)
-    except urllib.error.HTTPError as e:
-        headers = dict(e.headers)
-    except Exception as e:
-        return f"❌ 获取用量失败：{e}"
-
-    def h(key):
-        return headers.get(key) or headers.get(key.lower()) or headers.get(key.replace("-", "_"))
-
-    def fmt_pct(val):
-        if val is None:
-            return "未知"
-        pct = float(val) * 100
-        bar_len = 20
-        filled = round(pct / 100 * bar_len)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        return f"{bar} {pct:.1f}%"
-
-    def fmt_reset(ts):
-        if ts is None:
-            return "未知"
-        try:
-            dt = datetime.fromtimestamp(int(ts))
-            now = datetime.now()
-            diff = dt - now
-            hours = int(diff.total_seconds() // 3600)
-            minutes = int((diff.total_seconds() % 3600) // 60)
-            return f"{dt.strftime('%m/%d %H:%M')}（{hours}h{minutes}m 后）"
-        except Exception:
-            return ts
-
-    u5h = h("anthropic-ratelimit-unified-5h-utilization")
-    u7d = h("anthropic-ratelimit-unified-7d-utilization")
-    r5h = h("anthropic-ratelimit-unified-5h-reset")
-    r7d = h("anthropic-ratelimit-unified-7d-reset")
-    s5h = h("anthropic-ratelimit-unified-5h-status") or "unknown"
-    s7d = h("anthropic-ratelimit-unified-7d-status") or "unknown"
-
-    if u5h is None and u7d is None:
-        return "📊 **Usage**\n\n未能获取用量数据（响应中无用量 headers）。"
-
-    lines = ["📊 **Claude Max 用量**\n"]
-    lines.append(f"**5小时窗口**（状态：{s5h}）")
-    lines.append(f"{fmt_pct(u5h)}")
-    lines.append(f"重置时间：{fmt_reset(r5h)}\n")
-    lines.append(f"**7天窗口**（状态：{s7d}）")
-    lines.append(f"{fmt_pct(u7d)}")
-    lines.append(f"重置时间：{fmt_reset(r7d)}")
-
-    return "\n".join(lines)
+        return f"❌ 获取 Codex 登录状态失败：{e}"
+    output = (result.stdout or result.stderr).strip()
+    return "📊 **Codex 状态**\n\n" + (output or "已登录状态未知。")
 
 
 
 def _list_mcp() -> str:
-    """调用 claude mcp list 获取已配置的 MCP servers"""
+    """调用 codex mcp list 获取已配置的 MCP servers"""
     try:
         result = subprocess.run(
-            [CLAUDE_CLI, "mcp", "list"],
+            [CODEX_CLI, "mcp", "list"],
             capture_output=True, text=True, timeout=10,
+            env={**os.environ, "CODEX_HOME": os.path.expanduser(CODEX_HOME)},
         )
         output = result.stdout.strip()
     except Exception as e:
         return f"❌ 获取 MCP 列表失败：{e}"
 
     if not output:
-        return "暂无已配置的 MCP servers。\n\n用 `claude mcp add` 在终端添加。"
+        return "暂无已配置的 MCP servers。\n\n用 `codex mcp` 在终端管理。"
 
     return f"🔌 **已配置的 MCP Servers**\n\n{output}"
 
@@ -576,6 +500,7 @@ async def _format_project_status(user_id: str, chat_id: str, store: SessionStore
         lines.append(f"Lark 群绑定：`{binding.get('project')}` → `{binding.get('path')}`")
     else:
         lines.append("Lark 群绑定：（未绑定）")
+
     if projects:
         lines.append("")
         lines.append("已发现项目：")
@@ -584,6 +509,7 @@ async def _format_project_status(user_id: str, chat_id: str, store: SessionStore
     else:
         lines.append("")
         lines.append("还没有项目记忆文件。")
+
     lines.append("")
     lines.append("用法：")
     lines.append("`/project new 名称` 创建项目并绑定当前聊天")
@@ -599,15 +525,19 @@ async def _handle_project_command(args: str, user_id: str, chat_id: str, store: 
     ensure_hub()
     if not args:
         return await _format_project_status(user_id, chat_id, store)
+
     try:
         parts = shlex.split(args)
     except ValueError as e:
         return f"❌ 参数解析失败：{e}"
+
     if not parts:
         return await _format_project_status(user_id, chat_id, store)
+
     action = parts[0].lower()
     if action in {"list", "ls", "status"}:
         return await _format_project_status(user_id, chat_id, store)
+
     if action in {"new", "create", "use", "init"}:
         if len(parts) < 2:
             return "⚠️ 用法：`/project new 名称` 或 `/project use 名称或路径`"
@@ -624,7 +554,11 @@ async def _handle_project_command(args: str, user_id: str, chat_id: str, store: 
             "已创建/确认共享记忆文件：`AGENTS.md`、`CLAUDE.md`、`PROJECT_CONTEXT.md`、`TASKS.md`、`DECISIONS.md`、`HANDOFF.md`\n"
             "建议下一步：发送 `/brief` 检查项目记忆，或直接让 Codex/Claude 开始工作。"
         )
-    return f"❌ 未知子命令：`{action}`\n可用：`list`、`new`、`use`、`init`"
+
+    return (
+        f"❌ 未知子命令：`{action}`\n"
+        "可用：`list`、`new`、`use`、`init`"
+    )
 
 
 async def _handle_brief_command(user_id: str, chat_id: str, store: SessionStore) -> str:
@@ -685,10 +619,10 @@ async def handle_command(
     chat_id: str,
     store: SessionStore,
 ) -> Optional[str]:
-    """处理命令，返回回复文本。返回 None 表示不是 bot 命令，应转发给 Claude。"""
+    """处理命令，返回回复文本。返回 None 表示不是 bot 命令，应转发给 Codex。"""
 
     if cmd not in BOT_COMMANDS:
-        return None  # 不认识的 /xxx → 转发给 Claude（如 /commit 等 skill）
+        return None  # 不认识的 /xxx → 转发给 Codex（如 /commit 等指令）
 
     if cmd == "ws":
         cmd = "workspace"
@@ -749,7 +683,7 @@ async def handle_command(
     elif cmd == "model":
         if not args:
             cur = await store.get_current(user_id, chat_id)
-            return f"当前模型：`{cur.model}`\n可用：opus / sonnet / haiku 或完整模型 ID"
+            return f"当前模型：`{cur.model}`\n可用：default / mini / frontier 或完整模型 ID"
         model = MODEL_ALIASES.get(args.lower(), args)
         await store.set_model(user_id, chat_id, model)
         return f"✅ 已切换模型为 `{model}`"
@@ -834,4 +768,4 @@ async def handle_command(
         return "⏹ /stop 命令在消息队列外处理，如果看到这条说明当前没有运行中的任务。"
 
     else:
-        return None  # fallback: 转发给 Claude
+        return None  # fallback: 转发给 Codex

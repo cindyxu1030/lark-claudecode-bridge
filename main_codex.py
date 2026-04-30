@@ -1,9 +1,9 @@
 """
-飞书 × Claude Code Bot
+飞书 × Codex Bot
 通过 lark-cli WebSocket 长连接接收私聊/群聊消息和卡片回调，
-调用本机 claude CLI 回复，支持流式卡片输出。
+调用本机 codex CLI 回复，支持流式卡片输出。
 
-启动：python main.py
+启动：python main_codex.py
 """
 
 import asyncio
@@ -24,9 +24,9 @@ import lark_oapi as lark
 
 import bot_config as config
 from feishu_client import FeishuClient
-from session_store import SessionStore
-from commands import parse_command, handle_command
-from claude_runner import run_claude
+from session_store_codex import SessionStore
+from commands_codex import parse_command, handle_command
+from codex_runner import run_codex
 from run_control import ActiveRun, ActiveRunRegistry, stop_run
 from agent_hub import agent_context_preamble
 
@@ -68,6 +68,7 @@ def _watchdog():
 # ── 全局单例 ──────────────────────────────────────────────────
 
 _event_loop = None  # 主 asyncio 事件循环
+_instance_lock_file = None  # Keep this open for the lifetime of the process.
 
 lark_client = lark.Client.builder() \
     .app_id(config.FEISHU_APP_ID) \
@@ -459,7 +460,7 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
                 await feishu.reply_card(message_id, content=reply_text, loading=False)
             return
 
-    # ── 普通消息 → 先 reaction 再调用 Claude ──────────────────
+    # ── 普通消息 → 先 reaction 再调用 Codex ──────────────────
     # 第一反应：根据用户说的话，本能地回一个表情
     try:
         instinct = _pick_instinct_reaction(text)
@@ -468,7 +469,7 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
         pass
 
     session = await store.get_current(user_id, chat_id)
-    print(f"[Claude] session={session.session_id} model={session.model}", flush=True)
+    print(f"[Codex] session={session.session_id} model={session.model}", flush=True)
 
     try:
         card_msg_id = await feishu.reply_card(message_id, loading=True)
@@ -567,9 +568,9 @@ async def handle_doc_comment_from_cli(evt: dict):
 
         print(f"[文档评论] quote={quote[:50]}... text={comment_text[:50]}...", flush=True)
 
-        # 2. 调用 Claude 生成回复
-        from claude_runner import run_claude
-        full_text, _, _ = await run_claude(
+        # 2. 调用 Codex 生成回复
+        from codex_runner import run_codex
+        full_text, _, _ = await run_codex(
             message=prompt,
             session_id=None,
             model=config.DEFAULT_MODEL,
@@ -706,10 +707,10 @@ async def _poll_comment_replies(lark_cli, file_token, file_type, comment_id, use
                 prompt += f"[评论区对话历史：]\n" + "\n".join(history)
                 prompt += f"\n\n用户刚回复了：{reply_text}\n请继续对话，简洁回复。"
 
-                # 调用 Claude
-                from claude_runner import run_claude
+                # 调用 Codex
+                from codex_runner import run_codex
                 try:
-                    full_text, _, _ = await run_claude(
+                    full_text, _, _ = await run_codex(
                         message=prompt,
                         session_id=None,
                         model=config.DEFAULT_MODEL,
@@ -717,7 +718,7 @@ async def _poll_comment_replies(lark_cli, file_token, file_type, comment_id, use
                         permission_mode="bypassPermissions",
                     )
                 except Exception as e:
-                    print(f"[评论轮询] Claude 调用失败: {e}", flush=True)
+                    print(f"[评论轮询] Codex 调用失败: {e}", flush=True)
                     continue
 
                 if not full_text:
@@ -777,13 +778,13 @@ async def handle_card_action_from_cli(evt: dict):
             await _handle_button_reply(user_id, chat_id, reply_text, msg_id)
 
 
-# ── Claude 运行与展示 ────────────────────────────────────────
+# ── Codex 运行与展示 ─────────────────────────────────────────
 
 async def _run_and_display(
     user_id: str, chat_id: str, is_group: bool,
     text: str, card_msg_id: str, session, notify_msg_id: str,
 ):
-    """调用 Claude 并流式展示结果，检测选项时附加按钮。"""
+    """调用 Codex 并流式展示结果，检测选项时附加按钮。"""
     active_run = _active_runs.start_run(user_id, card_msg_id, chat_id=chat_id)
 
     accumulated = ""
@@ -864,11 +865,11 @@ async def _run_and_display(
             last_push_time = now
 
     try:
-        print(f"[run_claude] 开始调用...", flush=True)
+        print(f"[run_codex] 开始调用...", flush=True)
         hub_preamble = agent_context_preamble(session.cwd)
-        claude_message = f"{hub_preamble}{text}" if hub_preamble else text
-        full_text, new_session_id, used_fresh_session_fallback = await run_claude(
-            message=claude_message,
+        codex_message = f"{hub_preamble}{text}" if hub_preamble else text
+        full_text, new_session_id, used_fresh_session_fallback = await run_codex(
+            message=codex_message,
             session_id=session.session_id,
             model=session.model,
             cwd=session.cwd,
@@ -877,14 +878,14 @@ async def _run_and_display(
             on_tool_use=on_tool_use,
             on_process_start=lambda proc: _active_runs.attach_process(user_id, proc, chat_id=chat_id),
         )
-        print(f"[run_claude] 完成, session={new_session_id}", flush=True)
+        print(f"[run_codex] 完成, session={new_session_id}", flush=True)
     except Exception as e:
         if active_run.stop_requested:
             return
-        print(f"[error] Claude 运行失败: {type(e).__name__}: {e}", flush=True)
+        print(f"[error] Codex 运行失败: {type(e).__name__}: {e}", flush=True)
         traceback.print_exc()
         try:
-            await feishu.update_card(card_msg_id, f"❌ Claude 执行出错：{type(e).__name__}: {e}")
+            await feishu.update_card(card_msg_id, f"❌ Codex 执行出错：{type(e).__name__}: {e}")
         except Exception:
             pass
         return
@@ -915,7 +916,7 @@ async def _run_and_display(
             print(f"[error] 文本回退也失败: {fallback_err}", flush=True)
 
     if new_session_id:
-        await store.on_claude_response(user_id, chat_id, new_session_id, text)
+        await store.on_agent_response(user_id, chat_id, new_session_id, text)
 
     if plan_exited and session.permission_mode == "plan":
         print(f"[Plan] ExitPlanMode 检测到，切换为 bypassPermissions", flush=True)
@@ -933,7 +934,7 @@ async def _run_and_display(
 # ── 模式切换与按钮回复 ───────────────────────────────────────
 
 async def _handle_set_mode(user_id: str, chat_id: str, mode: str, card_msg_id: str):
-    from commands import VALID_MODES
+    from commands_codex import VALID_MODES
     await store.set_permission_mode(user_id, chat_id, mode)
     desc = VALID_MODES.get(mode, "")
     print(f"[模式切换] user={user_id[:8]}... mode={mode}", flush=True)
@@ -1277,8 +1278,8 @@ async def run_lark_cli_loop():
     - Uses --force so orphan connections from a previous crash don't block us
     - Spawns lark-cli in its own process group (start_new_session=True) so we
       can stop only this child when reconnecting.
-    - Does not kill "stale" lark-cli processes automatically; Codex and Claude
-      bridges may run side-by-side with separate Lark apps.
+    - Does not kill "stale" lark-cli processes automatically; that cleanup can
+      race with another bridge process and cause exit=-9 loops.
     """
     lark_cli = "/usr/local/bin/lark-cli"
     if not os.path.exists(lark_cli):
@@ -1356,13 +1357,70 @@ async def run_lark_cli_loop():
 
 # ── 启动 ──────────────────────────────────────────────────────
 
+def _cleanup_stale_processes():
+    """Kill any orphaned lark-cli subscribe processes from previous crashes.
+
+    This cleanup deliberately targets only the matching lark-cli PIDs. Older
+    bridge versions launched lark-cli in the same process group as the bridge,
+    so killing process groups here could make two bridge processes kill each
+    other during startup.
+    """
+    import signal
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "lark-cli.*event.*subscribe"],
+            capture_output=True, text=True
+        )
+        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+        if pids:
+            for pid in pids:
+                try:
+                    pid_int = int(pid)
+                    os.kill(pid_int, signal.SIGTERM)
+                except (ProcessLookupError, ValueError, OSError):
+                    pass
+            time.sleep(1)
+            for pid in pids:
+                try:
+                    pid_int = int(pid)
+                    os.kill(pid_int, 0)
+                    os.kill(pid_int, signal.SIGKILL)
+                except (ProcessLookupError, ValueError, OSError):
+                    pass
+            print(f"   清理旧进程  : 已杀掉 {len(pids)} 个 lark-cli 残留进程", flush=True)
+            time.sleep(3)  # Wait for Feishu server to release the WebSocket slot
+    except Exception:
+        pass
+
+
+def _acquire_instance_lock() -> bool:
+    """Prevent multiple bridge processes from racing and killing each other."""
+    global _instance_lock_file
+    import fcntl
+
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.lock")
+    _instance_lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(_instance_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+
+    _instance_lock_file.write(str(os.getpid()))
+    _instance_lock_file.flush()
+    return True
+
+
 def main():
-    print("🚀 飞书 Claude Bot 启动中...")
+    print("🚀 飞书 Codex Bot 启动中...")
     print(f"   App ID      : {config.FEISHU_APP_ID}")
     print(f"   默认模型    : {config.DEFAULT_MODEL}")
     print(f"   默认工作目录: {config.DEFAULT_CWD}")
     print(f"   权限模式    : {config.PERMISSION_MODE}")
     print(f"   事件接收    : lark-cli WebSocket (单连接)")
+
+    if not _acquire_instance_lock():
+        print("   单实例保护  : 已有一个 bridge 在运行，本进程退出", flush=True)
+        return
 
     # 启动看门狗线程
     t = threading.Thread(target=_watchdog, daemon=True)

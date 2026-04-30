@@ -8,12 +8,16 @@ FEISHU_APP_ID = os.environ["FEISHU_APP_ID"]
 FEISHU_APP_SECRET = os.environ["FEISHU_APP_SECRET"]
 
 CLAUDE_CLI = os.getenv("CLAUDE_CLI_PATH") or shutil.which("claude") or "claude"
+CODEX_CLI = os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex"
+CODEX_HOME = os.path.expanduser(os.getenv("CODEX_HOME", "~/.codex"))
 
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "claude-opus-4-6")
 DEFAULT_CWD = os.path.expanduser(os.getenv("DEFAULT_CWD", "~"))
 PERMISSION_MODE = os.getenv("PERMISSION_MODE", "bypassPermissions")
 
-SESSIONS_DIR = os.path.expanduser("~/.lark-claude")
+SESSIONS_DIR = os.path.expanduser(os.getenv("SESSIONS_DIR", "~/.lark-claude"))
+PROJECTS_ROOT = os.path.expanduser(os.getenv("PROJECTS_ROOT", "/Users/cindy/projects"))
+AGENT_HUB_ROOT = os.path.expanduser(os.getenv("AGENT_HUB_ROOT", os.path.join(PROJECTS_ROOT, "_agent-hub")))
 
 # 卡片按钮回调 HTTP 端口（需 ngrok 暴露）
 CALLBACK_PORT = int(os.getenv("CALLBACK_PORT", "9981"))

@@ -1,4 +1,10 @@
-# lark-claudecode-bridge
+# lark-agents-bridge
+
+This repo contains Lark/Feishu bridges for local coding agents:
+
+- Claude Code bridge: `main.py`
+- Codex bridge: `main_codex.py` and [README-CODEX.md](README-CODEX.md)
+- Shared Agent Hub project memory: `/project`, `/brief`, `/task`, `/handoff`, `/sync`
 
 [English](#english) · [中文](#chinese)
 
@@ -50,8 +56,8 @@ This fork has been **tested end-to-end on Lark international** (larksuite.com). 
 #### Install & run
 
 ```bash
-git clone https://github.com/cindyxu1030/lark-claudecode-bridge.git
-cd lark-claudecode-bridge
+git clone https://github.com/cindyxu1030/lark-agents-bridge.git
+cd lark-agents-bridge
 
 python3 -m venv .venv
 source .venv/bin/activate
