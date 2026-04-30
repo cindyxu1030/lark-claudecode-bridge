@@ -11,21 +11,22 @@
 
 ### 根因：配置被别的 skill 悄悄覆盖了
 
-Bridge 的架构有一个隐形依赖：
+Bridge 的架构有两条路径：
 
-- **发消息**走 Python SDK，读的是项目里的 `.env`
-- **收消息**走 `lark-cli` 子进程，默认读的是**全局** `~/.lark-cli/config.json`
+- **发消息 / 表情 / 图片下载**走 Python SDK 或直接 OpenAPI，读的是项目里的 `.env`
+- **收消息**走 `lark-cli` 子进程，启动时会把 `.env` 里的 App ID/Secret/brand 传给子进程
 
-这台 Mac 上装了一堆 lark-\* skill（lark-mail、lark-minutes、lark-doc、lark-base 等等），它们**共用同一个**全局配置文件。谁最后写谁就赢。如果某个 skill 把这份配置改成了另一个飞书 App 的凭证，bridge 的 lark-cli 子进程跟着订阅了那个 App 的事件，但你的机器人绑在**另一个 App** 上，消息就永远到不了 bridge。
+旧版本曾经强依赖全局 `~/.lark-cli/config.json`。如果你同时使用很多 lark-\* skill，仍然建议让全局配置和 bridge 的 `.env` 指向同一个 App，避免手动调试 `lark-cli` 时看错 App。
 
 **打个比方：** 你家装了两部电话，一部（Python SDK）专门拨出去，一部（lark-cli）专门接听。室友（别的 skill）把接听这部电话的号码改了，别人再打你家旧号码进来，那边永远没人接。你自己拨出去还正常，因为那部电话号码没被动。
 
 ### 已做的修复
 
-1. bridge 直接共用全局配置 `~/.lark-cli/config.json`（里面存的就是你 bridge 用的 App 凭证，appSecret 走 keychain 更安全）
+1. `lark-cli event +subscribe` 会收到 bridge `.env` 里的 App ID/Secret/brand
 2. `main.py` 的 `lark-cli event +subscribe` 加了 `--force` 参数，启动时强制接管飞书后端的 WebSocket 槽位，避免崩溃残留的幽灵连接吃掉事件
+3. 表情 reaction 不再依赖 `lark-cli` token 状态，改为使用 `.env` 里的 App ID/Secret 直接调用 OpenAPI
 
-> 注意：既然共用全局配置，如果某天你在别的 lark-\* skill 里切换了身份或换了 App，bridge 会跟着变。真要再出现"收不到消息"，先确认这份配置没被别的 skill 改掉。
+> 注意：如果你在同一个 clone 里同时跑 Claude 和 Codex，请用 `LARK_BRIDGE_ENV_FILE=.env.claude` / `.env.codex` 分开加载不同 App 凭证。
 
 ### 下次自己怎么诊断
 
@@ -39,7 +40,15 @@ lark-cli config show | grep appId
 grep FEISHU_APP_ID "/ABSOLUTE/PATH/TO/lark-agents-bridge/.env"
 ```
 
-App ID 对不上，就是配置被别的 skill 覆盖了。**修复方式：** 用 `lark-cli auth login` 重新登录到 bridge 绑定的那个 App。
+App ID 对不上，先重新初始化 CLI 配置：
+
+```bash
+APP_ID=$(grep "^FEISHU_APP_ID=" .env | cut -d= -f2)
+grep "^FEISHU_APP_SECRET=" .env | cut -d= -f2 | \
+  lark-cli config init --app-id "$APP_ID" --app-secret-stdin --brand lark
+```
+
+飞书国内版把 `--brand lark` 改成 `--brand feishu`，并确认 `.env` 里也有对应的 `LARKSUITE_CLI_BRAND`。
 
 如果 App ID 都对得上但还是收不到，可能的下一层问题：
 

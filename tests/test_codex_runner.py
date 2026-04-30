@@ -102,7 +102,33 @@ def test_run_codex_resumes_existing_thread(monkeypatch):
     assert text == "resumed"
     assert session_id == "019old"
     assert used_fallback is False
-    assert captured["args"][1:4] == ("exec", "resume", "--json")
+    assert "exec" in captured["args"]
+    exec_index = captured["args"].index("exec")
+    assert captured["args"][exec_index + 1:exec_index + 3] == ("resume", "--json")
+
+
+def test_run_codex_places_permission_flags_before_exec(monkeypatch):
+    proc = FakeProc([
+        b'{"type":"item.completed","item":{"type":"agent_message","text":"planned"}}\n',
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    text, _, _ = asyncio.run(run_codex("make a plan", permission_mode="plan"))
+
+    assert text == "planned"
+    assert captured["args"][1:6] == (
+        "--ask-for-approval",
+        "never",
+        "--sandbox",
+        "read-only",
+        "exec",
+    )
 
 
 def test_run_codex_raises_on_nonzero_without_output(monkeypatch):
@@ -115,4 +141,3 @@ def test_run_codex_raises_on_nonzero_without_output(monkeypatch):
 
     with pytest.raises(RuntimeError, match="fatal"):
         asyncio.run(run_codex("hi"))
-

@@ -17,10 +17,19 @@ Fill `.env` with the same Lark/Feishu app credentials you used for the Claude br
 ```bash
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
+LARKSUITE_CLI_BRAND=lark
 DEFAULT_MODEL=gpt-5.4
 DEFAULT_CWD=/path/to/your/project
 PERMISSION_MODE=bypassPermissions
 CODEX_HOME=~/.codex
+```
+
+Use `LARKSUITE_CLI_BRAND=feishu` for Feishu China.
+
+If one clone runs both Claude and Codex with separate Lark apps, keep separate env files:
+
+```bash
+LARK_BRIDGE_ENV_FILE=.env.codex python main_codex.py
 ```
 
 If Codex is running from a sandboxed context that cannot write to `~/.codex`, create a local writable Codex home and copy only your existing Codex auth/config:
@@ -57,6 +66,7 @@ Minimum scopes for group chat:
 
 - `im:message`
 - `im:message:send_as_bot`
+- `im:message.reactions:write_only`
 - `im:resource`
 
 Useful extras:
@@ -64,11 +74,16 @@ Useful extras:
 - `im:chat:read`
 - `im:chat.members:read`
 - `im:message.reactions:read`
-- `im:message.reactions:write_only`
+
+Events:
+
+- `im.message.receive_v1`
+- `card.action.trigger`
+- Optional for document comments: `drive.notice.comment_add_v1`
 
 ## Codex Modes
 
-- `/mode bypass` uses Codex `--full-auto`, which still keeps Codex sandboxing enabled.
+- `/mode bypass` uses Codex approval `never` with workspace-write sandboxing.
 - `/mode default` uses Codex approval-on-request with workspace-write sandboxing.
 - `/mode plan` uses a read-only sandbox and prepends a plan-only instruction.
 - Set `CODEX_DANGEROUS_BYPASS=true` only if you explicitly want Codex to run with `--dangerously-bypass-approvals-and-sandbox`.
@@ -92,6 +107,13 @@ Commands:
 - `/handoff TEXT` — append a handoff note to `HANDOFF.md`
 - `/task TEXT` — append a task to `TASKS.md`
 - `/sync` — write `PROJECT_BRIEF.md` and a copy in `~/projects/_agent-hub/latest-briefs`
+- `/discuss TOPIC` — run a bounded Claude/Codex discussion, post a summary, and save the transcript to `DISCUSSIONS.md`
+
+Group chat routing:
+
+- No bot mention: both Claude and Codex respond
+- `@Codex`: only Codex responds
+- `@Claude` / `@Claude Code`: only Claude responds
 
 Project memory files:
 
@@ -101,5 +123,6 @@ CLAUDE.md
 PROJECT_CONTEXT.md
 TASKS.md
 DECISIONS.md
+DISCUSSIONS.md
 HANDOFF.md
 ```

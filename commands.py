@@ -71,6 +71,7 @@ HELP_TEXT = """\
 `/handoff [内容]` — 追加交接记录
 `/task [内容]` — 追加项目任务
 `/sync` — 生成 PROJECT_BRIEF.md
+`/discuss [问题]` — 让 Claude 和 Codex 讨论，并返回总结
 
 **查看能力：**
 `/skills` — 列出已安装的 Claude Skills

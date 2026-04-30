@@ -8,6 +8,8 @@ import json
 import os
 import tempfile
 import time
+import urllib.error
+import urllib.parse
 from typing import Optional
 
 import lark_oapi as lark
@@ -198,6 +200,60 @@ class FeishuClient:
             self._download_image_sync, message_id, image_key
         )
 
+    async def add_reaction(self, message_id: str, emoji_type: str):
+        """Add a bot reaction without relying on lark-cli token state."""
+        return await asyncio.to_thread(
+            self._add_reaction_sync, message_id, emoji_type
+        )
+
+    def _add_reaction_sync(self, message_id: str, emoji_type: str):
+        import ssl
+        import urllib.request
+
+        ctx = ssl.create_default_context()
+        token = self._get_tenant_access_token(ctx)
+        base_url = _openapi_base_url()
+        encoded_message_id = urllib.parse.quote(message_id, safe="")
+        url = f"{base_url}/open-apis/im/v1/messages/{encoded_message_id}/reactions"
+        body = json.dumps({"reaction_type": {"emoji_type": emoji_type}}).encode()
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"reaction HTTP {e.code}: {detail}") from e
+        if data.get("code", 0) != 0:
+            raise RuntimeError(f"reaction API failed: {data.get('code')} {data.get('msg')}")
+        return data.get("data", data)
+
+    def _get_tenant_access_token(self, ctx) -> str:
+        import urllib.request
+
+        token_body = json.dumps({"app_id": self._app_id, "app_secret": self._app_secret}).encode()
+        token_req = urllib.request.Request(
+            f"{_openapi_base_url()}/open-apis/auth/v3/tenant_access_token/internal",
+            data=token_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(token_req, context=ctx, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        if data.get("code", 0) != 0:
+            raise RuntimeError(f"tenant token failed: {data.get('code')} {data.get('msg')}")
+        token = data.get("tenant_access_token")
+        if not token:
+            raise RuntimeError("tenant token response missing tenant_access_token")
+        return token
+
     def _download_image_sync(self, message_id: str, image_key: str) -> str:
         """同步下载逻辑，在线程池中执行"""
         import ssl
@@ -205,18 +261,11 @@ class FeishuClient:
         import uuid
 
         ctx = ssl.create_default_context()
-
-        token_body = json.dumps({"app_id": self._app_id, "app_secret": self._app_secret}).encode()
-        token_req = urllib.request.Request(
-            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-            data=token_body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(token_req, context=ctx, timeout=10) as r:
-            token = json.loads(r.read())["tenant_access_token"]
-
-        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{image_key}?type=image"
+        token = self._get_tenant_access_token(ctx)
+        base_url = _openapi_base_url()
+        encoded_message_id = urllib.parse.quote(message_id, safe="")
+        encoded_image_key = urllib.parse.quote(image_key, safe="")
+        url = f"{base_url}/open-apis/im/v1/messages/{encoded_message_id}/resources/{encoded_image_key}?type=image"
         img_req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         tmp_path = os.path.join(tempfile.gettempdir(), f"feishu-img-{uuid.uuid4().hex[:8]}.jpg")
         with urllib.request.urlopen(img_req, context=ctx, timeout=15) as r:
@@ -301,3 +350,13 @@ class FeishuClient:
         if not resp.success():
             raise RuntimeError(f"发送文本消息失败: {resp.code} {resp.msg}")
         return resp.data.message_id
+
+
+def _openapi_base_url() -> str:
+    explicit = os.getenv("LARK_OPENAPI_BASE_URL") or os.getenv("FEISHU_OPENAPI_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    brand = os.getenv("LARKSUITE_CLI_BRAND", "lark").strip().lower()
+    if brand == "feishu":
+        return "https://open.feishu.cn"
+    return "https://open.larksuite.com"

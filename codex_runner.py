@@ -16,13 +16,18 @@ IDLE_TIMEOUT = 900  # 15 minutes without output is treated as a hung run.
 
 
 def _permission_args(permission_mode: Optional[str]) -> list[str]:
+    """Return global Codex CLI permission flags.
+
+    Newer Codex CLI versions accept approval flags at the top level, not after
+    `codex exec`. Keep these args before the subcommand when building commands.
+    """
     mode = permission_mode or PERMISSION_MODE
     if mode == "plan":
         return ["--ask-for-approval", "never", "--sandbox", "read-only"]
     if mode in {"bypassPermissions", "dontAsk"}:
         if os.getenv("CODEX_DANGEROUS_BYPASS", "").lower() in {"1", "true", "yes"}:
             return ["--dangerously-bypass-approvals-and-sandbox"]
-        return ["--full-auto"]
+        return ["--ask-for-approval", "never", "--sandbox", "workspace-write"]
     if mode == "acceptEdits":
         return ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"]
     return ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"]
@@ -65,19 +70,19 @@ async def run_codex(
     """
 
     async def _run_once(active_session_id: Optional[str]) -> tuple[str, Optional[str], int, str]:
-        base_args = [
+        global_args = _permission_args(permission_mode)
+        exec_args = [
             "--json",
             "--skip-git-repo-check",
-            *(_permission_args(permission_mode)),
         ]
         if model:
-            base_args += ["--model", model]
+            exec_args += ["--model", model]
 
         prompt = _prompt_for_mode(message, permission_mode)
         if active_session_id:
-            cmd = [CODEX_CLI, "exec", "resume", *base_args, active_session_id, "-"]
+            cmd = [CODEX_CLI, *global_args, "exec", "resume", *exec_args, active_session_id, "-"]
         else:
-            cmd = [CODEX_CLI, "exec", *base_args, "-"]
+            cmd = [CODEX_CLI, *global_args, "exec", *exec_args, "-"]
 
         env = os.environ.copy()
         env["CODEX_HOME"] = os.path.expanduser(CODEX_HOME)
@@ -162,4 +167,3 @@ async def run_codex(
         raise RuntimeError(f"codex exited with code {returncode}: {detail}")
 
     return final_text, new_session_id, used_fresh_session_fallback
-

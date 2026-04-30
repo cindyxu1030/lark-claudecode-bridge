@@ -1,5 +1,6 @@
 .env
-.env.test
+.env.*
+!.env.example
 .codex-home/
 .lark-codex-sessions/
 .test-sessions/

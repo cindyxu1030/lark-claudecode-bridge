@@ -13,6 +13,7 @@ PROJECT_MEMORY_FILES = {
     "PROJECT_CONTEXT.md": "# Project Context\n\n## Goal\n\nTBD.\n\n## Users\n\nTBD.\n\n## Constraints\n\nTBD.\n",
     "TASKS.md": "# Tasks\n\n- [ ] Define the current project goal.\n",
     "DECISIONS.md": "# Decisions\n\n| Date | Decision | Reason |\n| --- | --- | --- |\n",
+    "DISCUSSIONS.md": "# Agent Discussions\n\nClaude and Codex discussion summaries and transcripts appear here.\n",
     "HANDOFF.md": "# Handoff\n\n## Current State\n\nTBD.\n\n## Next Best Action\n\nTBD.\n\n## Last Updates\n",
 }
 
@@ -91,7 +92,7 @@ def get_chat_binding(chat_id: str) -> dict:
 def build_brief(project_path: str) -> str:
     path = Path(project_path).expanduser()
     parts = []
-    for name in ("PROJECT_CONTEXT.md", "TASKS.md", "DECISIONS.md", "HANDOFF.md"):
+    for name in ("PROJECT_CONTEXT.md", "TASKS.md", "DECISIONS.md", "HANDOFF.md", "DISCUSSIONS.md"):
         parts.append(f"## {name}\n\n{_read_preview(path / name)}")
     return f"# Project Brief: {path.name}\n\n" + "\n\n".join(parts).strip() + "\n"
 
@@ -120,9 +121,30 @@ def append_task(project_path: str, text: str) -> None:
         f.write(f"\n- [ ] {text.strip()} _(added {stamp})_\n")
 
 
+def append_discussion(
+    project_path: str,
+    *,
+    topic: str,
+    summary: str,
+    transcript: str,
+    coordinator: str,
+) -> Path:
+    path = init_project(project_path)
+    stamp = datetime.now().isoformat(timespec="seconds")
+    discussion_path = path / "DISCUSSIONS.md"
+    with discussion_path.open("a", encoding="utf-8") as f:
+        f.write(f"\n## {stamp} - {topic.strip() or 'Untitled discussion'}\n\n")
+        f.write(f"Coordinator: {coordinator}\n\n")
+        f.write("### Summary\n\n")
+        f.write(summary.strip() + "\n\n")
+        f.write("### Transcript\n\n")
+        f.write(transcript.strip() + "\n")
+    return discussion_path
+
+
 def agent_context_preamble(project_path: str) -> str:
     path = Path(project_path).expanduser()
-    names = ["AGENTS.md", "PROJECT_CONTEXT.md", "TASKS.md", "DECISIONS.md", "HANDOFF.md"]
+    names = ["AGENTS.md", "PROJECT_CONTEXT.md", "TASKS.md", "DECISIONS.md", "HANDOFF.md", "DISCUSSIONS.md"]
     existing = [name for name in names if (path / name).exists()]
     if not existing:
         return ""

@@ -24,11 +24,19 @@ import lark_oapi as lark
 
 import bot_config as config
 from feishu_client import FeishuClient
-from session_store_codex import SessionStore
-from commands_codex import parse_command, handle_command
+try:
+    from session_store_codex import SessionStore
+except ImportError:
+    from session_store import SessionStore
+try:
+    from commands_codex import parse_command, handle_command
+except ImportError:
+    from commands import parse_command, handle_command
 from codex_runner import run_codex
 from run_control import ActiveRun, ActiveRunRegistry, stop_run
 from agent_hub import agent_context_preamble
+from agent_collab import run_agent_discussion
+from agent_routing import RoutingDecision, extract_text_for_routing, route_message_for_agent
 
 # ── 看门狗：检测休眠唤醒 + 健康日志 ─────────────────────────
 
@@ -83,6 +91,10 @@ _active_runs = ActiveRunRegistry()
 # per-chat 消息队列锁，保证同一群组的消息串行处理，允许不同群组并发处理
 _chat_locks: dict[str, asyncio.Lock] = {}
 _MAX_CHAT_LOCKS = 200  # 防止无界增长
+AGENT_NAME = "codex"
+SELF_ALIASES = ("Codex",)
+OTHER_ALIASES = ("Claude", "Claude Code", "Carl")
+COLLAB_COMMANDS = {"discuss", "collab"}
 
 
 # ── /stop 命令处理 ───────────────────────────────────────────
@@ -116,6 +128,68 @@ async def _handle_stop_command(sender_open_id: str, chat_id: str = "") -> str:
     if not stopped:
         return "当前没有正在运行的任务"
     return "已发送停止请求"
+
+
+def _route_for_this_agent(text: str, mentions: list[dict] | None, is_group: bool) -> RoutingDecision:
+    return route_message_for_agent(
+        text,
+        mentions,
+        is_group=is_group,
+        self_aliases=SELF_ALIASES,
+        other_aliases=OTHER_ALIASES,
+        self_ids=config.BOT_MENTION_OPEN_IDS,
+        other_ids=config.OTHER_BOT_MENTION_OPEN_IDS,
+    )
+
+
+def _should_handle_collab_command(is_group: bool, route_decision: RoutingDecision | None) -> bool:
+    if not is_group:
+        return True
+    coordinator = config.COLLAB_COORDINATOR_AGENT or "codex"
+    if AGENT_NAME == coordinator:
+        return True
+    return bool(route_decision and route_decision.mentioned_self and not route_decision.mentioned_other)
+
+
+async def _handle_discussion_command(args: str, user_id: str, chat_id: str, is_group: bool, message_id: str):
+    topic = args.strip()
+    if not topic:
+        await feishu.reply_card(
+            message_id,
+            content="用法：`/discuss 让 Claude 和 Codex 讨论的问题`",
+            loading=False,
+        )
+        return
+
+    try:
+        await _add_reaction(message_id, "THINKING")
+    except Exception:
+        pass
+
+    try:
+        card_msg_id = await feishu.reply_card(
+            message_id,
+            content="Claude 和 Codex 正在讨论。我会把结论汇总到这里。",
+            loading=True,
+        )
+        session = await store.get_current(user_id, chat_id)
+        result = await run_agent_discussion(topic, cwd=session.cwd, coordinator=AGENT_NAME)
+        reply = (
+            "**Claude ↔ Codex 讨论总结**\n\n"
+            f"{result.summary}\n\n"
+            f"完整记录：`{result.discussion_path}`"
+        )
+        await feishu.update_card(card_msg_id, reply)
+    except Exception as exc:
+        print(f"[collab] 讨论失败: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            await feishu.reply_card(
+                message_id,
+                content=f"❌ 讨论失败：{type(exc).__name__}: {exc}",
+                loading=False,
+            )
+        except Exception:
+            pass
 
 
 # ── 核心消息处理（async）─────────────────────────────────────
@@ -203,10 +277,16 @@ async def handle_message_from_cli(evt: dict):
         except Exception:
             content = {"text": content}
 
+    routing_text = extract_text_for_routing(msg_type, content)
+    route_decision = _route_for_this_agent(routing_text, mentions, is_group)
+    if not route_decision.should_respond:
+        print(f"[routing] 跳过消息: {route_decision.reason}", flush=True)
+        return
+
     # /stop 命令在锁外处理
     text = ""
     if msg_type == "text":
-        text = content.get("text", "").strip() if isinstance(content, dict) else str(content).strip()
+        text = route_decision.cleaned_text or (content.get("text", "").strip() if isinstance(content, dict) else str(content).strip())
         if text.lower() in ("/stop", "@_user_1 /stop") or text.strip().endswith("/stop"):
             reply = await _handle_stop_command(user_id, chat_id=chat_id)
             await feishu.reply_card(message_id, content=reply, loading=False)
@@ -229,14 +309,20 @@ async def handle_message_from_cli(evt: dict):
 
     async with lock:
         try:
-            await _process_message_cli(user_id, chat_id, is_group, msg_type, content, message_id, mentions, raw_oc_chat_id)
+            await _process_message_cli(
+                user_id, chat_id, is_group, msg_type, content,
+                message_id, mentions, raw_oc_chat_id, route_decision,
+            )
         except Exception as e:
             print(f"[error] 消息处理异常: {type(e).__name__}: {e}", flush=True)
             traceback.print_exc(file=sys.stdout)
             sys.stdout.flush()
 
 
-async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, message_id, mentions, raw_oc_chat_id=""):
+async def _process_message_cli(
+    user_id, chat_id, is_group, msg_type, content, message_id, mentions,
+    raw_oc_chat_id="", route_decision: RoutingDecision | None = None,
+):
     """处理消息内容"""
     print(f"[处理消息] user={user_id[:8]}... chat={chat_id[:8]}... is_group={is_group}", flush=True)
     text = ""
@@ -246,14 +332,13 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
         if not text:
             return
 
-        # 群聊去掉 @mention 占位符
-        if is_group and mentions:
-            for m in mentions:
-                key = m.get("key", "")
-                if key:
-                    text = text.replace(key, "").strip()
-            if not text:
-                return
+        route_decision = route_decision or _route_for_this_agent(text, mentions, is_group)
+        if not route_decision.should_respond:
+            print(f"[routing] 跳过消息: {route_decision.reason}", flush=True)
+            return
+        text = route_decision.cleaned_text
+        if not text:
+            return
 
         print(f"[文本] {text[:50]}", flush=True)
 
@@ -309,13 +394,6 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
 
         text = " ".join(parts).strip()
 
-        # 群聊去掉 @mention
-        if is_group and mentions:
-            for m in mentions:
-                key = m.get("key", "")
-                if key:
-                    text = text.replace(key, "").strip()
-
         # 富文本中的图片
         if image_keys:
             try:
@@ -349,6 +427,13 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
             except Exception as e:
                 print(f"[post fallback] 失败: {e}", flush=True)
 
+        if not text:
+            return
+        route_decision = _route_for_this_agent(text, mentions, is_group)
+        if not route_decision.should_respond:
+            print(f"[routing] 跳过消息: {route_decision.reason}", flush=True)
+            return
+        text = route_decision.cleaned_text
         if not text:
             return
         print(f"[富文本] {text[:80]}", flush=True)
@@ -437,6 +522,12 @@ async def _process_message_cli(user_id, chat_id, is_group, msg_type, content, me
     parsed = parse_command(text)
     if parsed:
         cmd, args = parsed
+        if cmd in COLLAB_COMMANDS:
+            if not _should_handle_collab_command(is_group, route_decision):
+                print("[collab] 当前消息由另一个 bot 协调，跳过", flush=True)
+                return
+            await _handle_discussion_command(args, user_id, chat_id, is_group, message_id)
+            return
         print(f"[cmd] 执行命令 {cmd}", flush=True)
         reply = await handle_command(cmd, args, user_id, chat_id, store)
         print(f"[cmd] 命令返回 type={type(reply).__name__}", flush=True)
@@ -1053,23 +1144,11 @@ def _pick_instinct_reaction(user_text: str) -> str:
 
 async def _add_reaction(message_id: str, emoji_type: str):
     """给消息添加表情 reaction"""
-    child_env = os.environ.copy()
-    child_env["LARKSUITE_CLI_APP_ID"] = config.FEISHU_APP_ID
-    child_env["LARKSUITE_CLI_APP_SECRET"] = config.FEISHU_APP_SECRET
-    child_env["LARKSUITE_CLI_BRAND"] = os.getenv("LARKSUITE_CLI_BRAND", "lark")
-    proc = await asyncio.create_subprocess_exec(
-        shutil.which("lark-cli") or "/usr/local/bin/lark-cli",
-        "im", "reactions", "create",
-        "--params", json.dumps({"message_id": message_id}),
-        "--data", json.dumps({"reaction_type": {"emoji_type": emoji_type}}),
-        "--as", "bot",
-        env=child_env,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.wait()
-    if proc.returncode == 0:
+    try:
+        await feishu.add_reaction(message_id, emoji_type)
         print(f"[reaction] {emoji_type} → {message_id[:16]}...", flush=True)
+    except Exception as exc:
+        print(f"[reaction] 失败 {message_id[:16]}...: {type(exc).__name__}: {str(exc)[:240]}", flush=True)
 
 
 def _extract_options(text: str) -> list[tuple[str, str]]:
@@ -1323,6 +1402,14 @@ async def run_lark_cli_loop():
                             and "not found handler" in line
                         ):
                             continue
+                        if (
+                            (
+                                "event type: im.message.reaction.created_v1" in line
+                                or "event type: im.message.reaction.deleted_v1" in line
+                            )
+                            and "not found handler" in line
+                        ):
+                            continue
                         print(f"[lark-cli stderr] {line}", flush=True)
                         if "connection reset" in line.lower() or "broken pipe" in line.lower():
                             print("[lark-cli] ⚠️ 检测到连接断开，立即重启", flush=True)
@@ -1356,41 +1443,6 @@ async def run_lark_cli_loop():
 
 
 # ── 启动 ──────────────────────────────────────────────────────
-
-def _cleanup_stale_processes():
-    """Kill any orphaned lark-cli subscribe processes from previous crashes.
-
-    This cleanup deliberately targets only the matching lark-cli PIDs. Older
-    bridge versions launched lark-cli in the same process group as the bridge,
-    so killing process groups here could make two bridge processes kill each
-    other during startup.
-    """
-    import signal
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "lark-cli.*event.*subscribe"],
-            capture_output=True, text=True
-        )
-        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-        if pids:
-            for pid in pids:
-                try:
-                    pid_int = int(pid)
-                    os.kill(pid_int, signal.SIGTERM)
-                except (ProcessLookupError, ValueError, OSError):
-                    pass
-            time.sleep(1)
-            for pid in pids:
-                try:
-                    pid_int = int(pid)
-                    os.kill(pid_int, 0)
-                    os.kill(pid_int, signal.SIGKILL)
-                except (ProcessLookupError, ValueError, OSError):
-                    pass
-            print(f"   清理旧进程  : 已杀掉 {len(pids)} 个 lark-cli 残留进程", flush=True)
-            time.sleep(3)  # Wait for Feishu server to release the WebSocket slot
-    except Exception:
-        pass
 
 
 def _acquire_instance_lock() -> bool:
