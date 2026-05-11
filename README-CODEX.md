@@ -32,14 +32,16 @@ If one clone runs both Claude and Codex with separate Lark apps, keep separate e
 LARK_BRIDGE_ENV_FILE=.env.codex python main_codex.py
 ```
 
-If Codex is running from a sandboxed context that cannot write to `~/.codex`, create a local writable Codex home and copy only your existing Codex auth/config:
+Prefer using your normal Codex home:
 
 ```bash
-mkdir -p .codex-home
-cp ~/.codex/auth.json .codex-home/auth.json
-cp ~/.codex/config.toml .codex-home/config.toml
-echo "CODEX_HOME=$(pwd)/.codex-home" >> .env
+CODEX_HOME=~/.codex
 ```
+
+Do **not** copy `~/.codex/auth.json` into another `CODEX_HOME`. Codex refresh
+tokens rotate; copying that file can later fail with `refresh_token_reused`.
+If you truly need an isolated `CODEX_HOME`, create it and run `codex login`
+for that home instead of copying auth files.
 
 Then start the bridge:
 
